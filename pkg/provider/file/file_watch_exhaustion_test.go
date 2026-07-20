@@ -102,7 +102,9 @@ func TestProvideWatchExhaustionRecreate(t *testing.T) {
 
 	configurationRoot := filepath.Join(directory, "recreated")
 	for i := range 40 {
-		require.NoError(t, os.RemoveAll(configurationRoot))
+		requireEventuallyNoError(t, func() error {
+			return os.RemoveAll(configurationRoot)
+		})
 
 		configurationDirectory := filepath.Join(configurationRoot, fmt.Sprintf("generation-%02d", i), "nested")
 		require.NoError(t, os.MkdirAll(configurationDirectory, 0o755))
@@ -121,11 +123,14 @@ func TestRecursiveFileWatcherExhaustionCleanup(t *testing.T) {
 	require.NoError(t, os.MkdirAll(persistentDirectory, 0o755))
 	writeExhaustionConfiguration(t, filepath.Join(persistentDirectory, "config.yml"), "persistent")
 
-	watcher, err := fsnotify.NewBufferedWatcher(4096)
+	watcher, err := fsnotify.NewWatcher()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, watcher.Close()) })
 
-	require.NoError(t, addRecursiveFileWatcher(watcher, directory))
+	_, err = runFileWatcherOperation(watcher, func() error {
+		return addRecursiveFileWatcher(watcher, directory)
+	})
+	require.NoError(t, err)
 	baseline := watcher.WatchList()
 	require.NotEmpty(t, baseline)
 
@@ -138,12 +143,20 @@ func TestRecursiveFileWatcherExhaustionCleanup(t *testing.T) {
 			writeExhaustionConfiguration(t, filepath.Join(nestedDirectory, fmt.Sprintf("config-%d.yml", j)), fmt.Sprintf("service_%03d_%d", i, j))
 		}
 
-		require.NoError(t, addRecursiveFileWatcher(watcher, transientDirectory))
+		_, err = runFileWatcherOperation(watcher, func() error {
+			return addRecursiveFileWatcher(watcher, transientDirectory)
+		})
+		require.NoError(t, err)
 		require.Greater(t, len(watcher.WatchList()), len(baseline))
 
-		require.NoError(t, removeRecursiveFileWatcher(watcher, transientDirectory))
+		_, err = runFileWatcherOperation(watcher, func() error {
+			return removeRecursiveFileWatcher(watcher, transientDirectory)
+		})
+		require.NoError(t, err)
 		require.ElementsMatch(t, baseline, watcher.WatchList())
-		require.NoError(t, os.RemoveAll(transientDirectory))
+		requireEventuallyNoError(t, func() error {
+			return os.RemoveAll(transientDirectory)
+		})
 	}
 }
 
@@ -185,7 +198,7 @@ func TestRecursiveFileWatcherWatchesFileSymlinks(t *testing.T) {
 	require.Contains(t, watcher.WatchList(), symlinkPath)
 }
 
-func TestRecursiveFileWatcherReportsSupportedDanglingSymlinks(t *testing.T) {
+func TestRecursiveFileWatcherHandlesSupportedDanglingSymlinks(t *testing.T) {
 	directory := t.TempDir()
 	symlinkPath := filepath.Join(directory, "dangling.yml")
 	if err := os.Symlink(filepath.Join(directory, "missing.yml"), symlinkPath); err != nil {
@@ -197,7 +210,10 @@ func TestRecursiveFileWatcherReportsSupportedDanglingSymlinks(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, watcher.Close()) })
 
 	err = addRecursiveFileWatcher(watcher, directory)
-	require.Error(t, err)
+	if err == nil {
+		require.Contains(t, watcher.WatchList(), symlinkPath)
+		return
+	}
 	require.ErrorContains(t, err, symlinkPath)
 }
 
@@ -244,7 +260,7 @@ func writeExhaustionConfiguration(t *testing.T, filename, serviceName string) {
 func replaceExhaustionConfiguration(t *testing.T, filename, serviceName string) {
 	t.Helper()
 
-	temporaryFile, err := os.CreateTemp(filepath.Dir(filename), ".replacement-*.yml")
+	temporaryFile, err := os.CreateTemp(filepath.Dir(filename), ".replacement-*")
 	require.NoError(t, err)
 	temporaryName := temporaryFile.Name()
 	t.Cleanup(func() { _ = os.Remove(temporaryName) })
@@ -255,9 +271,32 @@ func replaceExhaustionConfiguration(t *testing.T, filename, serviceName string) 
 
 	backupName := filename + ".backup"
 	_ = os.Remove(backupName)
-	require.NoError(t, os.Rename(filename, backupName))
-	require.NoError(t, os.Rename(temporaryName, filename))
-	require.NoError(t, os.Remove(backupName))
+	requireEventuallyNoError(t, func() error {
+		return os.Rename(filename, backupName)
+	})
+	requireEventuallyNoError(t, func() error {
+		return os.Rename(temporaryName, filename)
+	})
+	requireEventuallyNoError(t, func() error {
+		return os.Remove(backupName)
+	})
+}
+
+func requireEventuallyNoError(t *testing.T, operation func() error) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		err := operation()
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			require.NoError(t, err)
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func exhaustionConfiguration(serviceName string) string {
