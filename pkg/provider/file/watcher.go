@@ -12,22 +12,77 @@ import (
 )
 
 func addRecursiveFileWatcher(watcher *fsnotify.Watcher, root string) error {
-	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
+	info, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("checking file watcher root %s: %w", root, err)
+	}
 
-		if !entry.IsDir() && !isFileSupported(entry.Name()) {
+	if !info.IsDir() {
+		if !isFileSupported(filepath.Base(root)) {
 			return nil
 		}
 
-		log.Debug().Msgf("add watcher on: %s", path)
-		if err := watcher.Add(path); err != nil {
-			return fmt.Errorf("adding file watcher for %s: %w", path, err)
+		return addFileWatcher(watcher, root)
+	}
+
+	return addRecursiveDirectoryWatcher(watcher, root)
+}
+
+func addRecursiveDirectoryWatcher(watcher *fsnotify.Watcher, directory string) error {
+	if err := addFileWatcher(watcher, directory); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return fmt.Errorf("reading watched directory %s: %w", directory, err)
+	}
+
+	for _, entry := range entries {
+		path := filepath.Join(directory, entry.Name())
+
+		if entry.Type()&os.ModeSymlink != 0 {
+			if !isFileSupported(entry.Name()) {
+				continue
+			}
+
+			targetInfo, statErr := os.Stat(path)
+			if statErr == nil && targetInfo.IsDir() {
+				continue
+			}
+
+			if err := addFileWatcher(watcher, path); err != nil {
+				return err
+			}
+			continue
 		}
 
-		return nil
-	})
+		if entry.IsDir() {
+			if err := addRecursiveDirectoryWatcher(watcher, path); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if !isFileSupported(entry.Name()) {
+			continue
+		}
+
+		if err := addFileWatcher(watcher, path); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func addFileWatcher(watcher *fsnotify.Watcher, path string) error {
+	log.Debug().Msgf("add watcher on: %s", path)
+	if err := watcher.Add(path); err != nil {
+		return fmt.Errorf("adding file watcher for %s: %w", path, err)
+	}
+
+	return nil
 }
 
 func removeRecursiveFileWatcher(watcher *fsnotify.Watcher, root string) error {
@@ -54,4 +109,53 @@ func isSameOrDescendantPath(root, candidate string) bool {
 	}
 
 	return relativePath == "." || (relativePath != ".." && !strings.HasPrefix(relativePath, ".."+string(os.PathSeparator)))
+}
+
+type fileWatcherNotification struct {
+	event *fsnotify.Event
+	err   error
+}
+
+// runFileWatcherOperation keeps draining fsnotify while an operation mutates
+// the watch set. The Windows backend can otherwise block Add or Remove while
+// delivering events through its bounded channel.
+func runFileWatcherOperation(watcher *fsnotify.Watcher, operation func() error) ([]fileWatcherNotification, error) {
+	result := make(chan error, 1)
+	go func() {
+		result <- operation()
+	}()
+
+	events := watcher.Events
+	errorsChannel := watcher.Errors
+	var notifications []fileWatcherNotification
+
+	for {
+		select {
+		case err := <-result:
+			return notifications, err
+		case event, ok := <-events:
+			if !ok {
+				events = nil
+				if errorsChannel == nil {
+					return notifications, <-result
+				}
+				continue
+			}
+
+			if event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+				eventCopy := event
+				notifications = append(notifications, fileWatcherNotification{event: &eventCopy})
+			}
+		case err, ok := <-errorsChannel:
+			if !ok {
+				errorsChannel = nil
+				if events == nil {
+					return notifications, <-result
+				}
+				continue
+			}
+
+			notifications = append(notifications, fileWatcherNotification{err: err})
+		}
+	}
 }

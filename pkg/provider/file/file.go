@@ -154,16 +154,20 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 		return fmt.Errorf("error creating file watcher: %w", err)
 	}
 
+	var pendingNotifications []fileWatcherNotification
 	for _, item := range items {
-		if p.Directory != "" {
-			err = addRecursiveFileWatcher(watcher, item)
-		} else {
+		notifications, watchErr := runFileWatcherOperation(watcher, func() error {
+			if p.Directory != "" {
+				return addRecursiveFileWatcher(watcher, item)
+			}
+
 			log.Debug().Msgf("add watcher on: %s", item)
-			err = watcher.Add(item)
-		}
-		if err != nil {
+			return watcher.Add(item)
+		})
+		pendingNotifications = append(pendingNotifications, notifications...)
+		if watchErr != nil {
 			_ = watcher.Close()
-			return fmt.Errorf("error adding file watcher for %s: %w", item, err)
+			return fmt.Errorf("error adding file watcher for %s: %w", item, watchErr)
 		}
 	}
 
@@ -172,46 +176,80 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 		logger := log.With().Str(logs.ProviderName, ProviderName).Logger()
 		defer watcher.Close()
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			case evt, ok := <-watcher.Events:
-				if !ok {
+			var notification fileWatcherNotification
+			if len(pendingNotifications) > 0 {
+				select {
+				case <-ctx.Done():
 					return
+				default:
 				}
 
-				if p.Directory == "" {
-					_, evtFileName := filepath.Split(evt.Name)
-					_, confFileName := filepath.Split(p.Filename)
-					if evtFileName == confFileName {
-						err := callback(configurationChan)
-						if err != nil {
-							logger.Error().Err(err).Msg("Error occurred during watcher callback")
-						}
-					}
-				} else {
-					if evt.Has(fsnotify.Remove) || evt.Has(fsnotify.Rename) {
-						if err := removeRecursiveFileWatcher(watcher, evt.Name); err != nil {
-							logger.Error().Err(err).Str("path", evt.Name).Msg("Error removing recursive file watcher")
-						}
+				notification = pendingNotifications[0]
+				pendingNotifications[0] = fileWatcherNotification{}
+				pendingNotifications = pendingNotifications[1:]
+			} else {
+				select {
+				case <-ctx.Done():
+					return
+				case evt, ok := <-watcher.Events:
+					if !ok {
+						return
 					}
 
-					if evt.Has(fsnotify.Create) {
-						if err := addRecursiveFileWatcher(watcher, evt.Name); err != nil && !errors.Is(err, os.ErrNotExist) {
-							logger.Error().Err(err).Str("path", evt.Name).Msg("Error adding recursive file watcher")
-						}
+					eventCopy := evt
+					notification.event = &eventCopy
+				case watchErr, ok := <-watcher.Errors:
+					if !ok {
+						return
 					}
+					notification.err = watchErr
+				}
+			}
 
+			if notification.err != nil {
+				logger.Error().Err(notification.err).Msg("Watcher event error")
+				continue
+			}
+			if notification.event == nil {
+				continue
+			}
+
+			evt := *notification.event
+
+			if p.Directory == "" {
+				_, evtFileName := filepath.Split(evt.Name)
+				_, confFileName := filepath.Split(p.Filename)
+				if evtFileName == confFileName {
 					err := callback(configurationChan)
 					if err != nil {
 						logger.Error().Err(err).Msg("Error occurred during watcher callback")
 					}
 				}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
+			} else {
+				if evt.Has(fsnotify.Remove) || evt.Has(fsnotify.Rename) {
+					notifications, watchErr := runFileWatcherOperation(watcher, func() error {
+						return removeRecursiveFileWatcher(watcher, evt.Name)
+					})
+					pendingNotifications = append(pendingNotifications, notifications...)
+					if watchErr != nil {
+						logger.Error().Err(watchErr).Str("path", evt.Name).Msg("Error removing recursive file watcher")
+					}
 				}
-				logger.Error().Err(err).Msg("Watcher event error")
+
+				if evt.Has(fsnotify.Create) {
+					notifications, watchErr := runFileWatcherOperation(watcher, func() error {
+						return addRecursiveFileWatcher(watcher, evt.Name)
+					})
+					pendingNotifications = append(pendingNotifications, notifications...)
+					if watchErr != nil && !errors.Is(watchErr, os.ErrNotExist) {
+						logger.Error().Err(watchErr).Str("path", evt.Name).Msg("Error adding recursive file watcher")
+					}
+				}
+
+				err := callback(configurationChan)
+				if err != nil {
+					logger.Error().Err(err).Msg("Error occurred during watcher callback")
+				}
 			}
 		}
 	})
