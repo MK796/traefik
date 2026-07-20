@@ -228,11 +228,11 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 			} else {
 				if evt.Has(fsnotify.Remove) || evt.Has(fsnotify.Rename) {
 					notifications, watchErr := runFileWatcherOperation(watcher, func() error {
-						return refreshRecursiveFileWatcher(watcher, evt.Name, filepath.Clean(evt.Name) == filepath.Clean(p.Directory))
+						return removeRecursiveFileWatcher(watcher, evt.Name)
 					})
 					pendingNotifications = append(pendingNotifications, notifications...)
 					if watchErr != nil {
-						logger.Error().Err(watchErr).Str("path", evt.Name).Msg("Error refreshing recursive file watcher")
+						logger.Error().Err(watchErr).Str("path", evt.Name).Msg("Error removing recursive file watcher")
 					}
 				}
 

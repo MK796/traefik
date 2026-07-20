@@ -1,0 +1,17 @@
+diff --git a/backend_kqueue.go b/backend_kqueue.go
+index d2c8cfb..a776298 100644
+--- a/backend_kqueue.go
++++ b/backend_kqueue.go
+@@ -657,5 +657 @@ func (w *kqueue) sendCreateIfNew(path string, fi os.FileInfo) error {
+-	if !w.watches.seenBefore(path) {
+-		if !w.sendEvent(Event{Name: path, Op: Create}) {
+-			return nil
+-		}
+-	}
++	isNew := !w.watches.seenBefore(path)
+@@ -668,0 +665,5 @@ func (w *kqueue) sendCreateIfNew(path string, fi os.FileInfo) error {
++
++	if isNew && !w.sendEvent(Event{Name: path, Op: Create}) {
++		return nil
++	}
++

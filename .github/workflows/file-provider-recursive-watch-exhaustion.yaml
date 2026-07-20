@@ -38,6 +38,15 @@ jobs:
           go-version-file: .go-version
           check-latest: true
 
+      - name: Apply fsnotify kqueue event-ordering test patch
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          go mod download github.com/fsnotify/fsnotify
+          module_dir="$(go env GOMODCACHE)/github.com/fsnotify/fsnotify@v1.10.1"
+          chmod -R u+w "$module_dir"
+          git -C "$module_dir" apply --unidiff-zero "$GITHUB_WORKSPACE/.github/test-patches/fsnotify-kqueue-register-before-create.patch"
+
       - name: Run complete file-provider package
         if: runner.os != 'Windows'
         run: go test ./pkg/provider/file -count=1 -timeout=15m
