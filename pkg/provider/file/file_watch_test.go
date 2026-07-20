@@ -84,6 +84,26 @@ func TestProvideWatchRecursively(t *testing.T) {
 		writeWatchConfiguration(t, configurationFile, "after")
 		waitForService(t, configurationChan, "after")
 	})
+
+	t.Run("symlinked root", func(t *testing.T) {
+		baseDirectory := t.TempDir()
+		realDirectory := filepath.Join(baseDirectory, "real")
+		configurationFile := filepath.Join(realDirectory, "nested", "config.yml")
+
+		require.NoError(t, os.MkdirAll(filepath.Dir(configurationFile), 0o755))
+		writeWatchConfiguration(t, configurationFile, "before")
+
+		symlinkDirectory := filepath.Join(baseDirectory, "watched")
+		if err := os.Symlink(realDirectory, symlinkDirectory); err != nil {
+			t.Skipf("creating directory symlinks is not supported: %v", err)
+		}
+
+		configurationChan := startWatchedDirectoryProvider(t, symlinkDirectory)
+		waitForService(t, configurationChan, "before")
+
+		writeWatchConfiguration(t, configurationFile, "after")
+		waitForService(t, configurationChan, "after")
+	})
 }
 
 func startWatchedDirectoryProvider(t *testing.T, directory string) chan dynamic.Message {
@@ -91,8 +111,10 @@ func startWatchedDirectoryProvider(t *testing.T, directory string) chan dynamic.
 
 	configurationChan := make(chan dynamic.Message, 32)
 	provider := &Provider{Directory: directory, Watch: true}
+	pool := safe.NewPool(t.Context())
+	t.Cleanup(pool.Stop)
 
-	require.NoError(t, provider.Provide(configurationChan, safe.NewPool(t.Context())))
+	require.NoError(t, provider.Provide(configurationChan, pool))
 
 	return configurationChan
 }

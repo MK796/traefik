@@ -166,6 +166,41 @@ func TestRecursiveFileWatcherDoesNotFollowDirectorySymlinks(t *testing.T) {
 	require.NotContains(t, watcher.WatchList(), filepath.Join(externalDirectory, "nested"))
 }
 
+func TestRecursiveFileWatcherWatchesFileSymlinks(t *testing.T) {
+	directory := t.TempDir()
+	targetDirectory := t.TempDir()
+	targetPath := filepath.Join(targetDirectory, "target.yml")
+	require.NoError(t, os.WriteFile(targetPath, []byte(exhaustionConfiguration("target")), 0o644))
+
+	symlinkPath := filepath.Join(directory, "config.yml")
+	if err := os.Symlink(targetPath, symlinkPath); err != nil {
+		t.Skipf("creating file symlinks is not supported: %v", err)
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, watcher.Close()) })
+
+	require.NoError(t, addRecursiveFileWatcher(watcher, directory))
+	require.Contains(t, watcher.WatchList(), symlinkPath)
+}
+
+func TestRecursiveFileWatcherReportsSupportedDanglingSymlinks(t *testing.T) {
+	directory := t.TempDir()
+	symlinkPath := filepath.Join(directory, "dangling.yml")
+	if err := os.Symlink(filepath.Join(directory, "missing.yml"), symlinkPath); err != nil {
+		t.Skipf("creating file symlinks is not supported: %v", err)
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, watcher.Close()) })
+
+	err = addRecursiveFileWatcher(watcher, directory)
+	require.Error(t, err)
+	require.ErrorContains(t, err, symlinkPath)
+}
+
 func TestRecursiveFileWatcherIgnoresUnsupportedFiles(t *testing.T) {
 	directory := t.TempDir()
 	for i := range 1000 {
@@ -193,7 +228,9 @@ func startExhaustionProvider(t *testing.T, directory string) chan dynamic.Messag
 
 	configurationChan := make(chan dynamic.Message, 4096)
 	provider := &Provider{Directory: directory, Watch: true}
-	require.NoError(t, provider.Provide(configurationChan, safe.NewPool(t.Context())))
+	pool := safe.NewPool(t.Context())
+	t.Cleanup(pool.Stop)
+	require.NoError(t, provider.Provide(configurationChan, pool))
 
 	return configurationChan
 }
