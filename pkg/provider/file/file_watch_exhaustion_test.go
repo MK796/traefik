@@ -90,6 +90,10 @@ func TestProvideWatchExhaustionAtomicReplacement(t *testing.T) {
 		serviceName := fmt.Sprintf("replacement_%02d", i)
 		replaceExhaustionConfiguration(t, configurationFile, serviceName)
 		waitForExhaustionServices(t, configurationChan, map[string]struct{}{serviceName: {}}, 30*time.Second)
+
+		inPlaceServiceName := fmt.Sprintf("in_place_%02d", i)
+		writeExhaustionConfiguration(t, configurationFile, inPlaceServiceName)
+		waitForExhaustionServices(t, configurationChan, map[string]struct{}{inPlaceServiceName: {}}, 30*time.Second)
 	}
 }
 

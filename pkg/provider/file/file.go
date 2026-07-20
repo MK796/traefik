@@ -228,17 +228,19 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 			} else {
 				if evt.Has(fsnotify.Remove) || evt.Has(fsnotify.Rename) {
 					notifications, watchErr := runFileWatcherOperation(watcher, func() error {
-						return removeRecursiveFileWatcher(watcher, evt.Name)
+						return refreshRecursiveFileWatcher(watcher, evt.Name, filepath.Clean(evt.Name) == filepath.Clean(p.Directory))
 					})
 					pendingNotifications = append(pendingNotifications, notifications...)
 					if watchErr != nil {
-						logger.Error().Err(watchErr).Str("path", evt.Name).Msg("Error removing recursive file watcher")
+						logger.Error().Err(watchErr).Str("path", evt.Name).Msg("Error refreshing recursive file watcher")
 					}
 				}
 
 				if evt.Has(fsnotify.Create) {
+					// Parent watches already cover new files. Re-register only directories;
+					// startup file watches remain in place for bind-mounted configurations.
 					notifications, watchErr := runFileWatcherOperation(watcher, func() error {
-						return addRecursiveFileWatcher(watcher, evt.Name)
+						return addCreatedDirectoryWatcher(watcher, evt.Name, filepath.Clean(evt.Name) == filepath.Clean(p.Directory))
 					})
 					pendingNotifications = append(pendingNotifications, notifications...)
 					if watchErr != nil && !errors.Is(watchErr, os.ErrNotExist) {
