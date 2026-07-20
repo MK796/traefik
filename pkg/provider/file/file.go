@@ -8,7 +8,6 @@ import (
 	"maps"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -61,23 +60,6 @@ func (p *Provider) Provide(configurationChan chan<- dynamic.Message, pool *safe.
 		switch {
 		case len(p.Directory) > 0:
 			watchItems = append(watchItems, p.Directory)
-
-			fileList, err := os.ReadDir(p.Directory)
-			if err != nil {
-				return fmt.Errorf("unable to read directory %s: %w", p.Directory, err)
-			}
-
-			for _, entry := range fileList {
-				if entry.IsDir() {
-					// ignore sub-dir
-					continue
-				}
-				if !isFileSupported(entry.Name()) {
-					// ignore unsupported file extension
-					continue
-				}
-				watchItems = append(watchItems, path.Join(p.Directory, entry.Name()))
-			}
 		case len(p.Filename) > 0:
 			if !isFileSupported(p.Filename) {
 				return fmt.Errorf("unsupported file extension for file %s", p.Filename)
@@ -173,9 +155,14 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 	}
 
 	for _, item := range items {
-		log.Debug().Msgf("add watcher on: %s", item)
-		err = watcher.Add(item)
+		if p.Directory != "" {
+			err = addRecursiveFileWatcher(watcher, item)
+		} else {
+			log.Debug().Msgf("add watcher on: %s", item)
+			err = watcher.Add(item)
+		}
 		if err != nil {
+			_ = watcher.Close()
 			return fmt.Errorf("error adding file watcher for %s: %w", item, err)
 		}
 	}
@@ -188,7 +175,11 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 			select {
 			case <-ctx.Done():
 				return
-			case evt := <-watcher.Events:
+			case evt, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+
 				if p.Directory == "" {
 					_, evtFileName := filepath.Split(evt.Name)
 					_, confFileName := filepath.Split(p.Filename)
@@ -199,12 +190,27 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 						}
 					}
 				} else {
+					if evt.Has(fsnotify.Remove) || evt.Has(fsnotify.Rename) {
+						if err := removeRecursiveFileWatcher(watcher, evt.Name); err != nil {
+							logger.Error().Err(err).Str("path", evt.Name).Msg("Error removing recursive file watcher")
+						}
+					}
+
+					if evt.Has(fsnotify.Create) {
+						if err := addRecursiveFileWatcher(watcher, evt.Name); err != nil && !errors.Is(err, os.ErrNotExist) {
+							logger.Error().Err(err).Str("path", evt.Name).Msg("Error adding recursive file watcher")
+						}
+					}
+
 					err := callback(configurationChan)
 					if err != nil {
 						logger.Error().Err(err).Msg("Error occurred during watcher callback")
 					}
 				}
-			case err := <-watcher.Errors:
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
 				logger.Error().Err(err).Msg("Watcher event error")
 			}
 		}
