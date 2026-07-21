@@ -138,7 +138,9 @@ func TestRecursiveFileWatcherExhaustionCleanup(t *testing.T) {
 	baseline := watcher.WatchList()
 	require.NotEmpty(t, baseline)
 
-	transientDirectory := filepath.Join(directory, "transient")
+	// Keep direct Add/Remove stress independent from the event-driven parent
+	// watcher lifecycle, which TestProvideWatchExhaustionRecreate covers.
+	transientDirectory := filepath.Join(t.TempDir(), "transient")
 	for i := range 100 {
 		nestedDirectory := filepath.Join(transientDirectory, fmt.Sprintf("generation-%03d", i), "one", "two", "three")
 		require.NoError(t, os.MkdirAll(nestedDirectory, 0o755))
