@@ -69,6 +69,19 @@ jobs:
       - name: Test candidate preparation scripts
         run: ./script/downstream/test-candidate-scripts.sh
 
+      - name: Validate downstream workflows
+        env:
+          ACTIONLINT_ARCHIVE_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          archive="${RUNNER_TEMP}/actionlint.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "${archive}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_ARCHIVE_SHA256}  ${archive}" | sha256sum --check
+          tar --extract --gzip --file "${archive}" --directory "${RUNNER_TEMP}" actionlint
+          "${RUNNER_TEMP}/actionlint" .github/workflows/downstream-*.yaml
+
   validate:
     name: Upstream validation
     runs-on: ubuntu-latest
@@ -100,6 +113,67 @@ jobs:
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
         with:
           version: v2.10.1
+
+  generated-files:
+    name: Generated files
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: .go-version
+          check-latest: true
+          cache: false
+
+      - name: Verify generated Go and configuration files
+        run: |
+          make generate
+          git diff --exit-code
+          make generate-crd
+          git diff --exit-code
+
+  ui-tests:
+    name: WebUI unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version-file: webui/.nvmrc
+          cache: yarn
+          cache-dependency-path: webui/yarn.lock
+
+      - name: Set up safe-chain
+        run: |
+          npm install --global @aikidosec/safe-chain
+          safe-chain setup-ci
+
+      - name: Run WebUI unit tests
+        working-directory: webui
+        env:
+          VITE_APP_BASE_API_URL: /api
+        run: |
+          yarn install
+          yarn test:unit:ci
 
   provider-tests:
     name: File provider (${{ matrix.os }})
@@ -194,6 +268,91 @@ jobs:
 
       - name: Run complete Traefik unit suite
         run: go test -parallel 8 ./cmd/... ./pkg/...
+
+  integration-build:
+    name: Build integration-test binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: "0"
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: .go-version
+          check-latest: true
+
+      - name: Build Traefik and compile integration tests
+        run: |
+          touch webui/static/index.html
+          make binary-linux-amd64
+          go test -c -o /dev/null ./integration
+
+      - name: Upload Traefik binary
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: downstream-integration-traefik-${{ inputs.candidate_sha }}
+          path: dist/linux/amd64/traefik
+          retention-days: 1
+
+  integration-tests:
+    name: Integration tests (${{ matrix.index }}/12)
+    needs: integration-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CGO_ENABLED: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: .go-version
+          check-latest: true
+
+      - name: Download Traefik binary
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: downstream-integration-traefik-${{ inputs.candidate_sha }}
+          path: dist/linux/amd64
+
+      - name: Make binary executable
+        run: chmod +x dist/linux/amd64/traefik
+
+      - name: Create empty timing data
+        run: echo '<?xml version="1.0" encoding="UTF-8"?><testsuites></testsuites>' > integration-test-summary.xml
+
+      - name: Select integration-test shard
+        id: test-split
+        uses: hashicorp-forge/go-test-split-action@3b2b67379b94f6bea96556b2e4e15929b57c10cf # v2.0.3
+        with:
+          packages: ./integration
+          total: 12
+          index: ${{ matrix.index }}
+          junit-summary: ${{ github.workspace }}/integration-test-summary.xml
+
+      - name: Run integration-test shard
+        env:
+          SELECTED_TESTS: ${{ steps.test-split.outputs.run }}
+        run: go test ./integration -test.timeout=20m -v -run "${SELECTED_TESTS}"
 
   cross-build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.goarm && format('/v{0}', matrix.goarm) || '' }}
@@ -301,6 +460,7 @@ jobs:
         with:
           go-version-file: upstream/.go-version
           check-latest: true
+          cache: false
 
       - name: Build unpatched upstream image
         working-directory: upstream
