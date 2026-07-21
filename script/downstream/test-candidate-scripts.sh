@@ -22,6 +22,8 @@ printf 'base\n' > "${upstream_work}/base.txt"
 git -C "${upstream_work}" add base.txt
 git -C "${upstream_work}" commit --quiet --message base
 git -C "${upstream_work}" tag v3.0.0
+git -C "${upstream_work}" tag v3.0.1
+git -C "${upstream_work}" tag v3.1.0
 
 git clone --quiet --bare "${upstream_work}" "${upstream_bare}"
 git clone --quiet "${upstream_bare}" "${downstream_work}"
@@ -108,5 +110,40 @@ second_release_sha="$(git --git-dir="${origin_bare}" rev-parse automation/test-r
 test "${first_release_sha}" = "${second_release_sha}"
 grep -qx "patchset_id=${initial_patchset_id}" "${release_output}"
 grep -qx "patchset_id=${initial_patchset_id}" "${second_release_output}"
+
+empty_releases="${workspace}/empty-releases.json"
+printf '[]\n' > "${empty_releases}"
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${empty_releases}")"
+test "${selected_tag}" = v3.1.0
+
+incomplete_releases="${workspace}/incomplete-releases.json"
+jq --null-input '[
+  {draft:false,prerelease:false,tag_name:"downstream-v3.0.0-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]},
+  {draft:false,prerelease:false,tag_name:"downstream-v3.0.1-recursive.aaaaaaaaaaaa",assets:[]}
+]' > "${incomplete_releases}"
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${incomplete_releases}")"
+test "${selected_tag}" = v3.0.1
+
+completed_releases="${workspace}/completed-releases.json"
+jq --null-input '[
+  {draft:false,prerelease:false,tag_name:"downstream-v3.0.0-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]},
+  {draft:false,prerelease:false,tag_name:"downstream-v3.0.1-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]}
+]' > "${completed_releases}"
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${completed_releases}")"
+test "${selected_tag}" = v3.1.0
+
+latest_releases="${workspace}/latest-releases.json"
+jq --null-input '[
+  {draft:false,prerelease:false,tag_name:"downstream-v3.1.0-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]}
+]' > "${latest_releases}"
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${latest_releases}")"
+test "${selected_tag}" = v3.1.0
+
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" /dev/null v3.0.0)"
+test "${selected_tag}" = v3.0.0
+if (cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" /dev/null v3.9.9 >/dev/null 2>&1); then
+    echo "Release selection accepted a missing requested tag." >&2
+    exit 1
+fi
 
 echo "Downstream candidate script tests passed."
