@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"text/template"
+	"time"
 
 	"github.com/Masterminds/sprig/v3"
 	"github.com/fsnotify/fsnotify"
@@ -27,6 +28,8 @@ import (
 
 // ProviderName is the file provider name.
 const ProviderName = "file"
+
+const recursiveFileWatcherReconcileDelay = 25 * time.Millisecond
 
 var _ provider.Provider = (*Provider)(nil)
 
@@ -174,7 +177,41 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 	// Process events
 	pool.GoCtx(func(ctx context.Context) {
 		logger := log.With().Str(logs.ProviderName, ProviderName).Logger()
-		defer watcher.Close()
+		var reconcileTimer *time.Timer
+		var reconcileTimerC <-chan time.Time
+		defer func() {
+			if reconcileTimer != nil {
+				reconcileTimer.Stop()
+			}
+			_ = watcher.Close()
+		}()
+
+		scheduleRecursiveWatcherReconcile := func() {
+			if reconcileTimer != nil {
+				return
+			}
+
+			reconcileTimer = time.NewTimer(recursiveFileWatcherReconcileDelay)
+			reconcileTimerC = reconcileTimer.C
+		}
+
+		rebuildRecursiveWatcher := func() bool {
+			replacement, notifications, rebuildErr := newRecursiveFileWatcher(p.Directory)
+			if rebuildErr != nil {
+				logger.Error().Err(rebuildErr).Msg("Error rebuilding recursive file watcher")
+				return false
+			}
+
+			previous := watcher
+			watcher = replacement
+			pendingNotifications = notifications
+			if closeErr := previous.Close(); closeErr != nil {
+				logger.Error().Err(closeErr).Msg("Error closing replaced recursive file watcher")
+			}
+
+			return true
+		}
+
 		for {
 			var notification fileWatcherNotification
 			if len(pendingNotifications) > 0 {
@@ -191,6 +228,17 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 				select {
 				case <-ctx.Done():
 					return
+				case <-reconcileTimerC:
+					reconcileTimer = nil
+					reconcileTimerC = nil
+					if !rebuildRecursiveWatcher() {
+						continue
+					}
+
+					if callbackErr := callback(configurationChan); callbackErr != nil {
+						logger.Error().Err(callbackErr).Msg("Error occurred during watcher reconciliation callback")
+					}
+					continue
 				case evt, ok := <-watcher.Events:
 					if !ok {
 						return
@@ -208,6 +256,9 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 
 			if notification.err != nil {
 				logger.Error().Err(notification.err).Msg("Watcher event error")
+				if p.Directory != "" {
+					scheduleRecursiveWatcherReconcile()
+				}
 				continue
 			}
 			if notification.event == nil {
@@ -226,31 +277,12 @@ func (p *Provider) addWatcher(pool *safe.Pool, items []string, configurationChan
 					}
 				}
 			} else {
-				if evt.Has(fsnotify.Remove) || evt.Has(fsnotify.Rename) {
-					notifications, watchErr := runFileWatcherOperation(watcher, func() error {
-						return removeRecursiveFileWatcher(watcher, evt.Name)
-					})
-					pendingNotifications = append(pendingNotifications, notifications...)
-					if watchErr != nil {
-						logger.Error().Err(watchErr).Str("path", evt.Name).Msg("Error removing recursive file watcher")
-					}
+				if evt.Has(fsnotify.Create) || evt.Has(fsnotify.Remove) || evt.Has(fsnotify.Rename) {
+					scheduleRecursiveWatcherReconcile()
 				}
 
-				if evt.Has(fsnotify.Create) {
-					// Parent watches already cover new files. Re-register only directories;
-					// startup file watches remain in place for bind-mounted configurations.
-					notifications, watchErr := runFileWatcherOperation(watcher, func() error {
-						return addCreatedDirectoryWatcher(watcher, evt.Name, filepath.Clean(evt.Name) == filepath.Clean(p.Directory))
-					})
-					pendingNotifications = append(pendingNotifications, notifications...)
-					if watchErr != nil && !errors.Is(watchErr, os.ErrNotExist) {
-						logger.Error().Err(watchErr).Str("path", evt.Name).Msg("Error adding recursive file watcher")
-					}
-				}
-
-				err := callback(configurationChan)
-				if err != nil {
-					logger.Error().Err(err).Msg("Error occurred during watcher callback")
+				if callbackErr := callback(configurationChan); callbackErr != nil {
+					logger.Error().Err(callbackErr).Msg("Error occurred during watcher callback")
 				}
 			}
 		}
