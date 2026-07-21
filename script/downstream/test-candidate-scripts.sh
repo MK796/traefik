@@ -111,37 +111,52 @@ test "${first_release_sha}" = "${second_release_sha}"
 grep -qx "patchset_id=${initial_patchset_id}" "${release_output}"
 grep -qx "patchset_id=${initial_patchset_id}" "${second_release_output}"
 
+official_releases="${workspace}/official-releases.json"
+jq --null-input '[
+  {draft:false,prerelease:false,tag_name:"v3.0.0",published_at:"2026-01-01T00:00:00Z"},
+  {draft:false,prerelease:false,tag_name:"v3.1.0",published_at:"2026-02-01T00:00:00Z"},
+  {draft:false,prerelease:false,tag_name:"v3.0.1",published_at:"2026-03-01T00:00:00Z"},
+  {draft:false,prerelease:true,tag_name:"v3.2.0-rc1",published_at:"2026-04-01T00:00:00Z"},
+  {draft:false,prerelease:false,tag_name:"v4.0.0",published_at:"2026-05-01T00:00:00Z"}
+]' > "${official_releases}"
+
 empty_releases="${workspace}/empty-releases.json"
 printf '[]\n' > "${empty_releases}"
-selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${empty_releases}")"
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${official_releases}" "${empty_releases}")"
 test "${selected_tag}" = v3.1.0
 
 incomplete_releases="${workspace}/incomplete-releases.json"
 jq --null-input '[
-  {draft:false,prerelease:false,tag_name:"downstream-v3.0.0-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]},
-  {draft:false,prerelease:false,tag_name:"downstream-v3.0.1-recursive.aaaaaaaaaaaa",assets:[]}
+  {draft:false,prerelease:false,tag_name:"downstream-v3.1.0-recursive.aaaaaaaaaaaa",assets:[]}
 ]' > "${incomplete_releases}"
-selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${incomplete_releases}")"
-test "${selected_tag}" = v3.0.1
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${official_releases}" "${incomplete_releases}")"
+test "${selected_tag}" = v3.1.0
 
 completed_releases="${workspace}/completed-releases.json"
 jq --null-input '[
-  {draft:false,prerelease:false,tag_name:"downstream-v3.0.0-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]},
-  {draft:false,prerelease:false,tag_name:"downstream-v3.0.1-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]}
+  {draft:false,prerelease:false,tag_name:"downstream-v3.0.0-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]}
 ]' > "${completed_releases}"
-selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${completed_releases}")"
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${official_releases}" "${completed_releases}")"
 test "${selected_tag}" = v3.1.0
+
+backport_releases="${workspace}/backport-releases.json"
+jq --null-input '[
+  {draft:false,prerelease:false,tag_name:"downstream-v3.1.0-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]}
+]' > "${backport_releases}"
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${official_releases}" "${backport_releases}")"
+test "${selected_tag}" = v3.0.1
 
 latest_releases="${workspace}/latest-releases.json"
 jq --null-input '[
-  {draft:false,prerelease:false,tag_name:"downstream-v3.1.0-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]}
+  {draft:false,prerelease:false,tag_name:"downstream-v3.1.0-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]},
+  {draft:false,prerelease:false,tag_name:"downstream-v3.0.1-recursive.aaaaaaaaaaaa",assets:[{name:"downstream-release.json"}]}
 ]' > "${latest_releases}"
-selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${latest_releases}")"
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${official_releases}" "${latest_releases}")"
 test "${selected_tag}" = v3.1.0
 
-selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" /dev/null v3.0.0)"
+selected_tag="$(cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${official_releases}" "${empty_releases}" v3.0.0)"
 test "${selected_tag}" = v3.0.0
-if (cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" /dev/null v3.9.9 >/dev/null 2>&1); then
+if (cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${official_releases}" "${empty_releases}" v3.9.9 >/dev/null 2>&1); then
     echo "Release selection accepted a missing requested tag." >&2
     exit 1
 fi

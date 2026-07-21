@@ -27,8 +27,9 @@ Traefik `v3.x.y` tag. Images are published to GHCR with immutable tags containin
 both the upstream version and a rebase-stable patchset ID. An existing tag is
 reused only when its candidate and upstream labels match exactly; it is never
 overwritten. If several upstream releases arrive between polls, successive runs
-process the missing tags in version order. The newest stable tag is also rebuilt
-when the downstream patchset changes. Release cherry-picks use deterministic
+process the missing tags in upstream publication order, including later
+maintenance releases for an older v3 line. The highest stable v3 tag is also
+rebuilt when the downstream patchset changes. Release cherry-picks use deterministic
 commit metadata, so a retry reconstructs the same candidate. The image carries
 the exact upstream and candidate commits as OCI metadata and is published with
 BuildKit provenance and an SBOM.
