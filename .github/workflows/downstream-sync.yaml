@@ -132,7 +132,7 @@ jobs:
           UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha || 'unknown' }}
         run: |
           title="Downstream sync blocked"
-          printf -v body 'Automated Traefik downstream synchronization failed for upstream `%s`.\n\nWorkflow: %s\n\nThe known-good branch and published release images were not replaced.' "${UPSTREAM_SHA}" "${RUN_URL}"
+          printf -v body "Automated Traefik downstream synchronization failed for upstream \`%s\`.\n\nWorkflow: %s\n\nThe known-good branch and published release images were not replaced." "${UPSTREAM_SHA}" "${RUN_URL}"
           issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "${title} in:title" --json number --jq '.[0].number')"
           if [ -n "${issue_number}" ]; then
             gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"

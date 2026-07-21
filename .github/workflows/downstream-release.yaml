@@ -77,15 +77,19 @@ jobs:
           patchset_id="$(./script/downstream/patchset-id.sh "${patch_base_sha}" HEAD)"
           patchset_short="${patchset_id:0:12}"
           source_tag="downstream-${upstream_tag}-recursive.${patchset_short}"
-          echo "upstream_tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
-          echo "patchset_short=${patchset_short}" >> "${GITHUB_OUTPUT}"
-          echo "source_tag=${source_tag}" >> "${GITHUB_OUTPUT}"
 
           if git ls-remote --exit-code --tags origin "refs/tags/${source_tag}" >/dev/null 2>&1; then
-            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            changed=false
           else
-            echo "changed=true" >> "${GITHUB_OUTPUT}"
+            changed=true
           fi
+
+          {
+            echo "upstream_tag=${upstream_tag}"
+            echo "patchset_short=${patchset_short}"
+            echo "source_tag=${source_tag}"
+            echo "changed=${changed}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Prepare patched release candidate
         id: candidate
