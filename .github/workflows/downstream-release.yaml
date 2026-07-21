@@ -232,10 +232,39 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Create release failure issue
+      - name: Create or update release failure issue
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag || 'unknown' }}
         run: |
-          gh issue create --repo "${GITHUB_REPOSITORY}" --title "Downstream release blocked for ${UPSTREAM_TAG}" --body "The verified image was not published. Workflow: ${RUN_URL}"
+          title="Downstream release blocked for ${UPSTREAM_TAG}"
+          body="The verified image was not published. Workflow: ${RUN_URL}"
+          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "${title} in:title" --json number --jq '.[0].number')"
+          if [ -n "${issue_number}" ]; then
+            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
+          fi
+
+  close-failure-report:
+    name: Close resolved release issue
+    needs:
+      - prepare
+      - finalize
+    if: ${{ always() && needs.prepare.result == 'success' && (needs.prepare.outputs.changed != 'true' || needs.finalize.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Close open release failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+        run: |
+          for title in "Downstream release blocked for ${UPSTREAM_TAG}" "Downstream release blocked for unknown"; do
+            issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "${title} in:title" --json number --jq '.[0].number')"
+            if [ -n "${issue_number}" ]; then
+              gh issue close "${issue_number}" --repo "${GITHUB_REPOSITORY}" --comment "Release checks recovered in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+            fi
+          done

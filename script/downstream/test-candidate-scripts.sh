@@ -63,6 +63,21 @@ test "${upstream_sha}" = "${mirrored_sha}"
 git --git-dir="${origin_bare}" show automation/test-candidate:upstream.txt >/dev/null
 git --git-dir="${origin_bare}" show automation/test-candidate:downstream.txt >/dev/null
 
+repeat_sync_output="${workspace}/repeat-sync-output"
+(
+    cd "${downstream_work}"
+    GITHUB_OUTPUT="${repeat_sync_output}" \
+    UPSTREAM_URL="${upstream_bare}" \
+    CANDIDATE_BRANCH=automation/test-candidate-repeat \
+        "${script_directory}/prepare-upstream-candidate.sh"
+)
+first_sync_sha="$(git --git-dir="${origin_bare}" rev-parse automation/test-candidate)"
+second_sync_sha="$(git --git-dir="${origin_bare}" rev-parse automation/test-candidate-repeat)"
+test "${first_sync_sha}" = "${second_sync_sha}"
+grep -qx 'changed=true' "${repeat_sync_output}"
+grep -qx "patchset_id=${initial_patchset_id}" "${sync_output}"
+grep -qx "patchset_id=${initial_patchset_id}" "${repeat_sync_output}"
+
 git -C "${downstream_work}" fetch --quiet origin automation/test-candidate
 git -C "${downstream_work}" reset --quiet --hard FETCH_HEAD
 rebased_patchset_id="$(
@@ -160,5 +175,47 @@ if (cd "${downstream_work}" && "${script_directory}/select-release-tag.sh" "${of
     echo "Release selection accepted a missing requested tag." >&2
     exit 1
 fi
+
+conflict_upstream_work="${workspace}/conflict-upstream-work"
+conflict_upstream_bare="${workspace}/conflict-upstream.git"
+conflict_origin_bare="${workspace}/conflict-origin.git"
+conflict_downstream_work="${workspace}/conflict-downstream-work"
+
+git init --quiet --initial-branch=master "${conflict_upstream_work}"
+git -C "${conflict_upstream_work}" config user.name Test
+git -C "${conflict_upstream_work}" config user.email test@example.invalid
+printf 'base\n' > "${conflict_upstream_work}/shared.txt"
+git -C "${conflict_upstream_work}" add shared.txt
+git -C "${conflict_upstream_work}" commit --quiet --message base
+git clone --quiet --bare "${conflict_upstream_work}" "${conflict_upstream_bare}"
+git clone --quiet "${conflict_upstream_bare}" "${conflict_downstream_work}"
+git -C "${conflict_downstream_work}" config user.name Test
+git -C "${conflict_downstream_work}" config user.email test@example.invalid
+printf 'downstream\n' > "${conflict_downstream_work}/shared.txt"
+git -C "${conflict_downstream_work}" commit --quiet --all --message downstream
+
+git clone --quiet --bare "${conflict_upstream_work}" "${conflict_origin_bare}"
+git -C "${conflict_downstream_work}" remote set-url origin "${conflict_origin_bare}"
+git -C "${conflict_downstream_work}" push --quiet origin HEAD:refs/heads/downstream/recursive-watch
+known_good_sha="$(git --git-dir="${conflict_origin_bare}" rev-parse refs/heads/downstream/recursive-watch)"
+
+printf 'upstream\n' > "${conflict_upstream_work}/shared.txt"
+git -C "${conflict_upstream_work}" commit --quiet --all --message upstream
+git -C "${conflict_upstream_work}" push --quiet "${conflict_upstream_bare}" master
+
+if (
+    cd "${conflict_downstream_work}"
+    UPSTREAM_URL="${conflict_upstream_bare}" \
+    CANDIDATE_BRANCH=automation/conflicting-candidate \
+        "${script_directory}/prepare-upstream-candidate.sh" >/dev/null 2>&1
+); then
+    echo "Conflicting upstream candidate was accepted." >&2
+    exit 1
+fi
+if git --git-dir="${conflict_origin_bare}" show-ref --verify --quiet refs/heads/automation/conflicting-candidate; then
+    echo "Conflicting upstream candidate was published." >&2
+    exit 1
+fi
+test "$(git --git-dir="${conflict_origin_bare}" rev-parse refs/heads/downstream/recursive-watch)" = "${known_good_sha}"
 
 echo "Downstream candidate script tests passed."

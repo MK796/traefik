@@ -16,11 +16,12 @@ only execute from a repository's default branch.
 
 ## Automation
 
-`downstream-sync.yaml` checks upstream hourly, rebases the complete patch queue,
-and verifies the result. A candidate is promoted only after upstream validation,
-all file-provider tests, repeated lifecycle and exhaustion tests, the race
-detector, all Traefik release-target compile checks, the container E2E contract,
-the upstream sunset probe, and the final image build have succeeded.
+`downstream-sync.yaml` checks upstream hourly, deterministically replays the
+complete patch queue, and verifies the result. A candidate is promoted only
+after upstream validation, all file-provider tests, repeated lifecycle and
+exhaustion tests, the race detector, all Traefik release-target compile checks,
+the container E2E contract, the upstream sunset probe, and the final image build
+have succeeded.
 
 `downstream-release.yaml` applies the same patch queue to every new stable
 Traefik `v3.x.y` tag. Images are published to GHCR with immutable tags containing
@@ -50,15 +51,18 @@ temporary Go module cache on the macOS GitHub runner. The patch is visible in
 the workflow and is not included in published Linux images. It isolates a known
 kqueue event-ordering problem while fsnotify decides its recursive-watch API.
 
-## Ingress updates
+## Consumption
 
-Production must use a stable `v3.x.y-recursive.<patch>` image pinned by digest.
-Master images are compatibility artifacts and must not be deployed.
+This repository is independent from any ingress-stack repository. It does not
+write to, open pull requests against, or require downstream-specific files in a
+consumer repository. Consumers remain free to select either an official
+Traefik image or this temporary downstream through their existing image
+configuration.
 
-The ingress repository polls completed downstream GitHub releases and validates
-their `downstream-release.json` assets before opening a reviewable digest-update
-PR. No cross-repository write token is required, and releases never deploy
-automatically.
+When this downstream is selected for production, use a stable
+`v3.x.y-recursive.<patch>` image pinned by digest. Master images are compatibility
+artifacts and must not be deployed. Returning to upstream requires only selecting
+an official Traefik image; no repository migration is involved.
 
 ## Retirement
 
