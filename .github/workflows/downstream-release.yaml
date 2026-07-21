@@ -29,7 +29,7 @@ jobs:
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       candidate_short: ${{ steps.candidate.outputs.candidate_short }}
       changed: ${{ steps.select.outputs.changed }}
-      patch_tip_short: ${{ steps.candidate.outputs.patch_tip_short }}
+      patchset_short: ${{ steps.select.outputs.patchset_short }}
       source_tag: ${{ steps.select.outputs.source_tag }}
       upstream_sha: ${{ steps.candidate.outputs.upstream_sha }}
       upstream_tag: ${{ steps.select.outputs.upstream_tag }}
@@ -56,6 +56,7 @@ jobs:
           else
             git remote add upstream https://github.com/traefik/traefik.git
           fi
+          git fetch --no-tags upstream master
           git fetch --tags upstream
 
           upstream_tag="${REQUESTED_TAG}"
@@ -72,9 +73,12 @@ jobs:
             exit 1
           fi
 
-          patch_tip_short="$(git rev-parse --short=12 HEAD)"
-          source_tag="downstream-${upstream_tag}-recursive.${patch_tip_short}"
+          patch_base_sha="$(git merge-base HEAD refs/remotes/upstream/master)"
+          patchset_id="$(./script/downstream/patchset-id.sh "${patch_base_sha}" HEAD)"
+          patchset_short="${patchset_id:0:12}"
+          source_tag="downstream-${upstream_tag}-recursive.${patchset_short}"
           echo "upstream_tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+          echo "patchset_short=${patchset_short}" >> "${GITHUB_OUTPUT}"
           echo "source_tag=${source_tag}" >> "${GITHUB_OUTPUT}"
 
           if git ls-remote --exit-code --tags origin "refs/tags/${source_tag}" >/dev/null 2>&1; then
@@ -90,6 +94,13 @@ jobs:
           CANDIDATE_BRANCH: automation/release-${{ steps.select.outputs.upstream_tag }}-${{ github.run_id }}
           UPSTREAM_TAG: ${{ steps.select.outputs.upstream_tag }}
         run: ./script/downstream/prepare-release-candidate.sh
+
+      - name: Verify release patch identity
+        if: steps.select.outputs.changed == 'true'
+        env:
+          ACTUAL_PATCHSET: ${{ steps.candidate.outputs.patchset_short }}
+          EXPECTED_PATCHSET: ${{ steps.select.outputs.patchset_short }}
+        run: test "${ACTUAL_PATCHSET}" = "${EXPECTED_PATCHSET}"
 
   verify:
     name: Verify release candidate
@@ -109,7 +120,7 @@ jobs:
     uses: ./.github/workflows/downstream-image.yaml
     with:
       candidate_sha: ${{ needs.prepare.outputs.candidate_sha }}
-      image_tag: ${{ needs.prepare.outputs.upstream_tag }}-recursive.${{ needs.prepare.outputs.patch_tip_short }}
+      image_tag: ${{ needs.prepare.outputs.upstream_tag }}-recursive.${{ needs.prepare.outputs.patchset_short }}
       upstream_ref: ${{ needs.prepare.outputs.upstream_tag }}
       upstream_sha: ${{ needs.prepare.outputs.upstream_sha }}
 

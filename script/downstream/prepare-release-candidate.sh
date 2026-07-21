@@ -6,6 +6,7 @@ upstream_url="${UPSTREAM_URL:-https://github.com/traefik/traefik.git}"
 upstream_branch="${UPSTREAM_BRANCH:-master}"
 upstream_tag="${UPSTREAM_TAG:?UPSTREAM_TAG is required}"
 candidate_branch="${CANDIDATE_BRANCH:-automation/release-candidate}"
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 write_output() {
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
@@ -29,8 +30,8 @@ git fetch upstream "refs/tags/${upstream_tag}:refs/tags/${upstream_tag}"
 
 upstream_ref="refs/remotes/upstream/${upstream_branch}"
 release_sha="$(git rev-parse "refs/tags/${upstream_tag}^{commit}")"
-patch_tip_sha="$(git rev-parse HEAD)"
 patch_base_sha="$(git merge-base HEAD "${upstream_ref}")"
+patchset_id="$("${script_directory}/patchset-id.sh" "${patch_base_sha}" HEAD)"
 
 mapfile -t patch_commits < <(git rev-list --reverse "${patch_base_sha}..HEAD")
 if [ "${#patch_commits[@]}" -eq 0 ]; then
@@ -49,7 +50,10 @@ cleanup() {
 trap cleanup EXIT
 
 git worktree add --detach "${worktree}" "${release_sha}"
-git -C "${worktree}" cherry-pick "${patch_commits[@]}"
+for commit in "${patch_commits[@]}"; do
+    author_date="$(git show --no-patch --format=%aI "${commit}")"
+    GIT_COMMITTER_DATE="${author_date}" git -C "${worktree}" cherry-pick "${commit}"
+done
 
 candidate_sha="$(git -C "${worktree}" rev-parse HEAD)"
 git -C "${worktree}" push --force origin "HEAD:refs/heads/${candidate_branch}"
@@ -57,8 +61,8 @@ git -C "${worktree}" push --force origin "HEAD:refs/heads/${candidate_branch}"
 write_output upstream_tag "${upstream_tag}"
 write_output upstream_sha "${release_sha}"
 write_output upstream_short "${release_sha:0:12}"
-write_output patch_tip_sha "${patch_tip_sha}"
-write_output patch_tip_short "${patch_tip_sha:0:12}"
+write_output patchset_id "${patchset_id}"
+write_output patchset_short "${patchset_id:0:12}"
 write_output patch_count "${#patch_commits[@]}"
 write_output candidate_sha "${candidate_sha}"
 write_output candidate_short "${candidate_sha:0:12}"

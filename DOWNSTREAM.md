@@ -24,9 +24,12 @@ the upstream sunset probe, and the final image build have succeeded.
 
 `downstream-release.yaml` applies the same patch queue to every new stable
 Traefik `v3.x.y` tag. Images are published to GHCR with immutable tags containing
-both the upstream version and downstream patch revision. Existing image tags
-are never overwritten. The image carries the exact upstream and candidate
-commits as OCI metadata and is published with BuildKit provenance and an SBOM.
+both the upstream version and a rebase-stable patchset ID. An existing tag is
+reused only when its candidate and upstream labels match exactly; it is never
+overwritten. Release cherry-picks use deterministic commit metadata, so a retry
+reconstructs the same candidate. The image carries the exact upstream and
+candidate commits as OCI metadata and is published with BuildKit provenance and
+an SBOM.
 
 Failures leave the known-good branch and existing images untouched and are
 reported as GitHub issues.
