@@ -206,10 +206,12 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          go mod download github.com/fsnotify/fsnotify
-          module_dir="$(go list -m -f '{{.Dir}}' github.com/fsnotify/fsnotify)"
+          isolated_modcache="${RUNNER_TEMP}/fsnotify-kqueue-test-modcache"
+          GOMODCACHE="${isolated_modcache}" go mod download github.com/fsnotify/fsnotify
+          module_dir="$(GOMODCACHE="${isolated_modcache}" go list -m -f '{{.Dir}}' github.com/fsnotify/fsnotify)"
           chmod -R u+w "${module_dir}"
           git -C "${module_dir}" apply --unidiff-zero "${GITHUB_WORKSPACE}/.github/test-patches/fsnotify-kqueue-register-before-create.patch"
+          go mod edit -replace="github.com/fsnotify/fsnotify=${module_dir}"
 
       - name: Run complete file-provider package
         if: runner.os != 'Windows'
