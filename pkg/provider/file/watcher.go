@@ -59,6 +59,9 @@ func addRecursiveDirectoryWatcher(watcher *fsnotify.Watcher, directory string) e
 
 		if entry.IsDir() {
 			if err := addRecursiveDirectoryWatcher(watcher, path); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 				return err
 			}
 			continue
@@ -69,35 +72,14 @@ func addRecursiveDirectoryWatcher(watcher *fsnotify.Watcher, directory string) e
 		}
 
 		if err := addFileWatcher(watcher, path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return err
 		}
 	}
 
 	return nil
-}
-
-func addCreatedDirectoryWatcher(watcher *fsnotify.Watcher, path string, followSymlink bool) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("checking created watcher path %s: %w", path, err)
-	}
-
-	if info.Mode()&os.ModeSymlink != 0 {
-		if !followSymlink {
-			return nil
-		}
-
-		info, err = os.Stat(path)
-		if err != nil {
-			return fmt.Errorf("checking created watcher symlink %s: %w", path, err)
-		}
-	}
-
-	if !info.IsDir() {
-		return nil
-	}
-
-	return addRecursiveDirectoryWatcher(watcher, path)
 }
 
 func addFileWatcher(watcher *fsnotify.Watcher, path string) error {
@@ -124,6 +106,22 @@ func removeRecursiveFileWatcher(watcher *fsnotify.Watcher, root string) error {
 	}
 
 	return errors.Join(removeErrors...)
+}
+
+func newRecursiveFileWatcher(root string) (*fsnotify.Watcher, []fileWatcherNotification, error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating recursive file watcher: %w", err)
+	}
+
+	notifications, watchErr := runFileWatcherOperation(watcher, func() error {
+		return addRecursiveFileWatcher(watcher, root)
+	})
+	if watchErr != nil {
+		return nil, notifications, errors.Join(watchErr, watcher.Close())
+	}
+
+	return watcher, notifications, nil
 }
 
 func isSameOrDescendantPath(root, candidate string) bool {

@@ -166,6 +166,37 @@ func TestRecursiveFileWatcherExhaustionCleanup(t *testing.T) {
 	}
 }
 
+func TestRecursiveFileWatcherRebuildsAfterRecreate(t *testing.T) {
+	directory := t.TempDir()
+	recreatedDirectory := filepath.Join(directory, "recreated")
+	configurationFile := filepath.Join(recreatedDirectory, "nested", "config.yml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(configurationFile), 0o755))
+	writeExhaustionConfiguration(t, configurationFile, "before")
+
+	watcher, err := fsnotify.NewWatcher()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, watcher.Close()) })
+
+	_, err = runFileWatcherOperation(watcher, func() error {
+		return addRecursiveFileWatcher(watcher, directory)
+	})
+	require.NoError(t, err)
+
+	requireEventuallyNoError(t, func() error {
+		return os.RemoveAll(recreatedDirectory)
+	})
+	require.NoError(t, os.MkdirAll(filepath.Dir(configurationFile), 0o755))
+	writeExhaustionConfiguration(t, configurationFile, "after")
+
+	replacement, _, err := newRecursiveFileWatcher(directory)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, replacement.Close()) })
+
+	require.Contains(t, replacement.WatchList(), recreatedDirectory)
+	require.Contains(t, replacement.WatchList(), filepath.Dir(configurationFile))
+	require.Contains(t, replacement.WatchList(), configurationFile)
+}
+
 func TestRecursiveFileWatcherDoesNotFollowDirectorySymlinks(t *testing.T) {
 	directory := t.TempDir()
 	externalDirectory := t.TempDir()
