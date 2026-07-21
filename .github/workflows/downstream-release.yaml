@@ -59,16 +59,15 @@ jobs:
             git remote add upstream https://github.com/traefik/traefik.git
           fi
           git fetch --no-tags upstream master
-          git fetch --tags upstream
+          git fetch --force upstream 'refs/tags/*:refs/tags/*'
 
-          upstream_tag="${REQUESTED_TAG}"
-          if [ -z "${upstream_tag}" ]; then
-            while IFS= read -r candidate_tag; do
-              if [[ "${candidate_tag}" =~ ^v3\.[0-9]+\.[0-9]+$ ]]; then
-                upstream_tag="${candidate_tag}"
-                break
-              fi
-            done < <(git tag --list 'v3.*' --sort=-version:refname)
+          if [ -z "${REQUESTED_TAG}" ]; then
+            releases_file="${RUNNER_TEMP}/completed-downstream-releases.json"
+            gh api --paginate --jq '.[]' "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq --slurp '.' > "${releases_file}"
+            upstream_tag="$(./script/downstream/select-release-tag.sh "${releases_file}")"
+          else
+            upstream_tag="$(./script/downstream/select-release-tag.sh /dev/null "${REQUESTED_TAG}")"
           fi
           if ! [[ "${upstream_tag}" =~ ^v3\.[0-9]+\.[0-9]+$ ]]; then
             echo "No stable Traefik v3 release tag was selected." >&2

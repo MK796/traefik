@@ -26,10 +26,12 @@ the upstream sunset probe, and the final image build have succeeded.
 Traefik `v3.x.y` tag. Images are published to GHCR with immutable tags containing
 both the upstream version and a rebase-stable patchset ID. An existing tag is
 reused only when its candidate and upstream labels match exactly; it is never
-overwritten. Release cherry-picks use deterministic commit metadata, so a retry
-reconstructs the same candidate. The image carries the exact upstream and
-candidate commits as OCI metadata and is published with BuildKit provenance and
-an SBOM.
+overwritten. If several upstream releases arrive between polls, successive runs
+process the missing tags in version order. The newest stable tag is also rebuilt
+when the downstream patchset changes. Release cherry-picks use deterministic
+commit metadata, so a retry reconstructs the same candidate. The image carries
+the exact upstream and candidate commits as OCI metadata and is published with
+BuildKit provenance and an SBOM.
 
 The corresponding GitHub release is the completion marker. Its
 `downstream-release.json` asset records the immutable image reference, digest,
