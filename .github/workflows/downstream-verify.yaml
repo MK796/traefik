@@ -66,6 +66,9 @@ jobs:
             esac
           done < <(git diff --name-only "${UPSTREAM_SHA}..HEAD")
 
+      - name: Test candidate preparation scripts
+        run: ./script/downstream/test-candidate-scripts.sh
+
   validate:
     name: Upstream validation
     runs-on: ubuntu-latest
