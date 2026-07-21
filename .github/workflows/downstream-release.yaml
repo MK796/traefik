@@ -61,14 +61,15 @@ jobs:
           git fetch --no-tags upstream master
           git fetch --force upstream 'refs/tags/*:refs/tags/*'
 
-          if [ -z "${REQUESTED_TAG}" ]; then
-            releases_file="${RUNNER_TEMP}/completed-downstream-releases.json"
-            gh api --paginate --jq '.[]' "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-              | jq --slurp '.' > "${releases_file}"
-            upstream_tag="$(./script/downstream/select-release-tag.sh "${releases_file}")"
-          else
-            upstream_tag="$(./script/downstream/select-release-tag.sh /dev/null "${REQUESTED_TAG}")"
-          fi
+          official_releases_file="${RUNNER_TEMP}/official-traefik-releases.json"
+          downstream_releases_file="${RUNNER_TEMP}/completed-downstream-releases.json"
+          gh api --paginate --jq '.[]' 'repos/traefik/traefik/releases?per_page=100' \
+            | jq --slurp '.' > "${official_releases_file}"
+          gh api --paginate --jq '.[]' "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            | jq --slurp '.' > "${downstream_releases_file}"
+
+          upstream_tag="$(./script/downstream/select-release-tag.sh \
+            "${official_releases_file}" "${downstream_releases_file}" "${REQUESTED_TAG}")"
           if ! [[ "${upstream_tag}" =~ ^v3\.[0-9]+\.[0-9]+$ ]]; then
             echo "No stable Traefik v3 release tag was selected." >&2
             exit 1
