@@ -1,0 +1,317 @@
+name: Downstream candidate verification
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Fully qualified candidate commit to verify.
+        required: true
+        type: string
+      upstream_sha:
+        description: Exact upstream commit used as the candidate base.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Fully qualified candidate commit to verify.
+        required: true
+        type: string
+      upstream_sha:
+        description: Exact upstream commit used as the candidate base.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  patch-integrity:
+    name: Patch integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify upstream base and patch scope
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${CANDIDATE_SHA}"
+          test "$(git merge-base HEAD "${UPSTREAM_SHA}")" = "${UPSTREAM_SHA}"
+          test -z "$(git rev-list --merges "${UPSTREAM_SHA}..HEAD")"
+
+          while IFS= read -r changed_file; do
+            case "${changed_file}" in
+              .github/test-patches/fsnotify-kqueue-register-before-create.patch | \
+              .github/workflows/downstream-*.yaml | \
+              DOWNSTREAM.md | \
+              pkg/provider/file/file.go | \
+              pkg/provider/file/file_watch_exhaustion_test.go | \
+              pkg/provider/file/file_watch_test.go | \
+              pkg/provider/file/watcher.go | \
+              script/downstream/*)
+                ;;
+              *)
+                echo "Unexpected downstream file: ${changed_file}" >&2
+                exit 1
+                ;;
+            esac
+          done < <(git diff --name-only "${UPSTREAM_SHA}..HEAD")
+
+  validate:
+    name: Upstream validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: .go-version
+          check-latest: true
+          cache: false
+
+      - name: Install misspell
+        env:
+          MISSPELL_VERSION: v0.7.0
+        run: curl -sfL https://raw.githubusercontent.com/golangci/misspell/HEAD/install-misspell.sh | sh -s -- -b "$(go env GOPATH)/bin" "${MISSPELL_VERSION}"
+
+      - name: Validate repository files
+        run: make validate-files
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        with:
+          version: v2.10.1
+
+  provider-tests:
+    name: File provider (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      TRAEFIK_FILE_WATCH_EXHAUSTION: "1"
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: .go-version
+          check-latest: true
+
+      - name: Apply visible fsnotify kqueue test patch
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          go mod download github.com/fsnotify/fsnotify
+          module_dir="$(go list -m -f '{{.Dir}}' github.com/fsnotify/fsnotify)"
+          chmod -R u+w "${module_dir}"
+          git -C "${module_dir}" apply --unidiff-zero "${GITHUB_WORKSPACE}/.github/test-patches/fsnotify-kqueue-register-before-create.patch"
+
+      - name: Run complete file-provider package
+        if: runner.os != 'Windows'
+        run: go test ./pkg/provider/file -count=1 -timeout=15m
+
+      - name: Run recursive watcher tests on Windows
+        if: runner.os == 'Windows'
+        run: go test ./pkg/provider/file -run "^(TestProvideWatchRecursively|TestProvideWatchExhaustion.*|TestRecursiveFileWatcher.*)$" -count=1 -timeout=15m
+
+      - name: Repeat lifecycle and edge tests
+        run: go test ./pkg/provider/file -run "^(TestProvideWatchRecursively|TestRecursiveFileWatcher.*)$" -count=25 -timeout=20m
+
+      - name: Repeat exhaustion tests
+        run: go test ./pkg/provider/file -run "^Test.*Exhaustion" -count=5 -timeout=30m
+
+  race-tests:
+    name: Race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TRAEFIK_FILE_WATCH_EXHAUSTION: "1"
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: .go-version
+          check-latest: true
+
+      - name: Repeat tests with race detector
+        run: go test -race ./pkg/provider/file -run "^(TestProvideWatchRecursively|TestProvideWatchExhaustion.*|TestRecursiveFileWatcher.*)$" -count=5 -timeout=35m
+
+  unit-tests:
+    name: Complete unit suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: .go-version
+          check-latest: true
+
+      - name: Run complete Traefik unit suite
+        run: go test -parallel 8 ./cmd/... ./pkg/...
+
+  cross-build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.goarm && format('/v{0}', matrix.goarm) || '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: darwin, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+          - {goos: freebsd, goarch: "386"}
+          - {goos: freebsd, goarch: amd64}
+          - {goos: freebsd, goarch: arm64}
+          - {goos: linux, goarch: "386"}
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm, goarm: "6"}
+          - {goos: linux, goarch: arm, goarm: "7"}
+          - {goos: linux, goarch: arm64}
+          - {goos: linux, goarch: ppc64le}
+          - {goos: linux, goarch: riscv64}
+          - {goos: linux, goarch: s390x}
+          - {goos: openbsd, goarch: "386"}
+          - {goos: openbsd, goarch: amd64}
+          - {goos: openbsd, goarch: arm64}
+          - {goos: windows, goarch: "386"}
+          - {goos: windows, goarch: amd64}
+          - {goos: windows, goarch: arm64}
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        env:
+          ImageOS: ${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.goarm }}
+        with:
+          go-version-file: .go-version
+          check-latest: true
+
+      - name: Cross-compile Traefik
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          GOOS: ${{ matrix.goos }}
+        run: go build -trimpath -o "${RUNNER_TEMP}/traefik-${GOOS}-${GOARCH}${GOARM}" ./cmd/traefik
+
+  container-e2e:
+    name: Container E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: .go-version
+          check-latest: true
+
+      - name: Build E2E image
+        run: |
+          mkdir -p dist/linux/amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/linux/amd64/traefik ./cmd/traefik
+          docker build --build-arg TARGETPLATFORM=linux/amd64 --tag traefik-recursive-e2e:${{ inputs.candidate_sha }} .
+
+      - name: Exercise recursive watch lifecycle
+        env:
+          E2E_TIMEOUT_SECONDS: "30"
+        run: ./script/downstream/recursive-watch-container-e2e.sh traefik-recursive-e2e:${{ inputs.candidate_sha }}
+
+  upstream-native-probe:
+    name: Upstream sunset probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out downstream controls
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          path: downstream-control
+          persist-credentials: false
+
+      - name: Check out exact upstream source
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          repository: traefik/traefik
+          ref: ${{ inputs.upstream_sha }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: upstream/.go-version
+          check-latest: true
+
+      - name: Build unpatched upstream image
+        working-directory: upstream
+        run: |
+          mkdir -p dist/linux/amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/linux/amd64/traefik ./cmd/traefik
+          docker build --build-arg TARGETPLATFORM=linux/amd64 --tag traefik-upstream-probe:${{ inputs.upstream_sha }} .
+
+      - name: Confirm downstream patch is still required
+        env:
+          E2E_TIMEOUT_SECONDS: "5"
+        run: |
+          if ./downstream-control/script/downstream/recursive-watch-container-e2e.sh traefik-upstream-probe:${{ inputs.upstream_sha }}; then
+            echo "Upstream now passes the recursive-watch contract; retire the downstream patch." >&2
+            exit 1
+          fi
+          echo "Upstream does not yet satisfy the recursive-watch contract."
