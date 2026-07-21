@@ -56,6 +56,22 @@ for commit in "${patch_commits[@]}"; do
 done
 
 candidate_sha="$(git -C "${worktree}" rev-parse HEAD)"
+candidate_base_sha="$(git -C "${worktree}" merge-base HEAD "${release_sha}")"
+candidate_patch_count="$(git -C "${worktree}" rev-list --count "${release_sha}..HEAD")"
+candidate_patchset_id="$("${script_directory}/patchset-id.sh" "${release_sha}" "${candidate_sha}")"
+if [ "${candidate_base_sha}" != "${release_sha}" ]; then
+    echo "Release candidate is not based directly on ${upstream_tag}." >&2
+    exit 1
+fi
+if [ "${candidate_patch_count}" -ne "${#patch_commits[@]}" ]; then
+    echo "Release replay changed the patch count from ${#patch_commits[@]} to ${candidate_patch_count}." >&2
+    exit 1
+fi
+if [ "${candidate_patchset_id}" != "${patchset_id}" ]; then
+    echo "Release replay changed the stable patchset identity." >&2
+    exit 1
+fi
+
 git -C "${worktree}" push --force origin "HEAD:refs/heads/${candidate_branch}"
 
 write_output upstream_tag "${upstream_tag}"

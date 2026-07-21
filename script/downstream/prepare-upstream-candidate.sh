@@ -6,6 +6,7 @@ upstream_url="${UPSTREAM_URL:-https://github.com/traefik/traefik.git}"
 upstream_branch="${UPSTREAM_BRANCH:-master}"
 candidate_branch="${CANDIDATE_BRANCH:-automation/upstream-candidate}"
 force_candidate="${FORCE_CANDIDATE:-false}"
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 write_output() {
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
@@ -24,18 +25,26 @@ upstream_ref="refs/remotes/upstream/${upstream_branch}"
 upstream_sha="$(git rev-parse "${upstream_ref}")"
 downstream_sha="$(git rev-parse HEAD)"
 patch_base_sha="$(git merge-base HEAD "${upstream_ref}")"
-patch_count="$(git rev-list --count "${patch_base_sha}..HEAD")"
+mapfile -t patch_commits < <(git rev-list --reverse "${patch_base_sha}..HEAD")
+patch_count="${#patch_commits[@]}"
 
 if [ "${patch_count}" -eq 0 ]; then
     echo "The downstream branch does not contain a patch queue." >&2
     exit 1
 fi
+if git rev-list --merges "${patch_base_sha}..HEAD" | grep -q .; then
+    echo "The downstream patch queue must not contain merge commits." >&2
+    exit 1
+fi
+
+patchset_id="$("${script_directory}/patchset-id.sh" "${patch_base_sha}" HEAD)"
 
 write_output upstream_sha "${upstream_sha}"
 write_output upstream_short "${upstream_sha:0:12}"
 write_output downstream_sha "${downstream_sha}"
 write_output patch_base_sha "${patch_base_sha}"
 write_output patch_count "${patch_count}"
+write_output patchset_id "${patchset_id}"
 
 # Keep the fork's master branch as an exact fast-forward-only upstream mirror.
 git push origin "${upstream_ref}:refs/heads/master"
@@ -53,23 +62,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-git worktree add --detach "${worktree}" "${downstream_sha}"
-git -C "${worktree}" rebase --onto "${upstream_ref}" "${patch_base_sha}"
+git worktree add --detach "${worktree}" "${upstream_sha}"
+for commit in "${patch_commits[@]}"; do
+    author_date="$(git show --no-patch --format=%aI "${commit}")"
+    GIT_COMMITTER_DATE="${author_date}" git -C "${worktree}" cherry-pick "${commit}"
+done
 
 candidate_sha="$(git -C "${worktree}" rev-parse HEAD)"
 candidate_base_sha="$(git -C "${worktree}" merge-base HEAD "${upstream_ref}")"
 candidate_patch_count="$(git -C "${worktree}" rev-list --count "${upstream_ref}..HEAD")"
+candidate_patchset_id="$("${script_directory}/patchset-id.sh" "${upstream_sha}" "${candidate_sha}")"
 
 if [ "${candidate_base_sha}" != "${upstream_sha}" ]; then
     echo "Candidate is not based directly on the requested upstream commit." >&2
     exit 1
 fi
 if [ "${candidate_patch_count}" -ne "${patch_count}" ]; then
-    echo "Rebase changed the patch count from ${patch_count} to ${candidate_patch_count}." >&2
+    echo "Candidate replay changed the patch count from ${patch_count} to ${candidate_patch_count}." >&2
     exit 1
 fi
-if git -C "${worktree}" rev-list --merges "${upstream_ref}..HEAD" | grep -q .; then
-    echo "The downstream patch queue must not contain merge commits." >&2
+if [ "${candidate_patchset_id}" != "${patchset_id}" ]; then
+    echo "Candidate replay changed the stable patchset identity." >&2
     exit 1
 fi
 
