@@ -1,0 +1,158 @@
+name: Sync recursive-watch downstream
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Verify and publish even when upstream master is unchanged.
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: downstream-upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  issues: write
+  packages: write
+
+jobs:
+  prepare:
+    name: Prepare rebased candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
+      candidate_short: ${{ steps.candidate.outputs.candidate_short }}
+      changed: ${{ steps.candidate.outputs.changed }}
+      downstream_sha: ${{ steps.candidate.outputs.downstream_sha }}
+      upstream_sha: ${{ steps.candidate.outputs.upstream_sha }}
+      upstream_short: ${{ steps.candidate.outputs.upstream_short }}
+
+    steps:
+      - name: Check out known-good downstream
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: downstream/recursive-watch
+          fetch-depth: 0
+
+      - name: Configure synchronization identity
+        run: |
+          git config user.name "MK796 Traefik downstream bot"
+          git config user.email "95221524+MK796@users.noreply.github.com"
+
+      - name: Prepare candidate
+        id: candidate
+        env:
+          CANDIDATE_BRANCH: automation/upstream-candidate
+          FORCE_CANDIDATE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+        run: ./script/downstream/prepare-upstream-candidate.sh
+
+  verify:
+    name: Verify candidate
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    uses: ./.github/workflows/downstream-verify.yaml
+    with:
+      candidate_sha: ${{ needs.prepare.outputs.candidate_sha }}
+      upstream_sha: ${{ needs.prepare.outputs.upstream_sha }}
+
+  publish-edge:
+    name: Publish verified edge image
+    needs:
+      - prepare
+      - verify
+    if: needs.prepare.outputs.changed == 'true'
+    uses: ./.github/workflows/downstream-image.yaml
+    with:
+      candidate_sha: ${{ needs.prepare.outputs.candidate_sha }}
+      image_tag: master-${{ needs.prepare.outputs.upstream_short }}-recursive.${{ needs.prepare.outputs.candidate_short }}
+      upstream_ref: master
+      upstream_sha: ${{ needs.prepare.outputs.upstream_sha }}
+
+  promote:
+    name: Promote known-good downstream
+    needs:
+      - prepare
+      - verify
+      - publish-edge
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out current downstream
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: downstream/recursive-watch
+          fetch-depth: 0
+
+      - name: Promote exact verified commit
+        env:
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.candidate_sha }}
+          EXPECTED_DOWNSTREAM_SHA: ${{ needs.prepare.outputs.downstream_sha }}
+        run: |
+          git fetch origin refs/heads/automation/upstream-candidate
+          test "$(git rev-parse FETCH_HEAD)" = "${CANDIDATE_SHA}"
+          git push --force-with-lease="refs/heads/downstream/recursive-watch:${EXPECTED_DOWNSTREAM_SHA}" origin "${CANDIDATE_SHA}:refs/heads/downstream/recursive-watch"
+
+      - name: Record promotion
+        env:
+          IMAGE_DIGEST: ${{ needs.publish-edge.outputs.image_digest }}
+          IMAGE_REF: ${{ needs.publish-edge.outputs.image_ref }}
+        run: |
+          {
+            echo "### Promoted downstream"
+            echo
+            echo "- Commit: \`${{ needs.prepare.outputs.candidate_sha }}\`"
+            echo "- Image: \`${IMAGE_REF}@${IMAGE_DIGEST}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  report-failure:
+    name: Report blocked synchronization
+    needs:
+      - prepare
+      - verify
+      - publish-edge
+      - promote
+    if: ${{ always() && (needs.prepare.result == 'failure' || needs.verify.result == 'failure' || needs.publish-edge.result == 'failure' || needs.promote.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Create or update blocking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha || 'unknown' }}
+        run: |
+          title="Downstream sync blocked"
+          printf -v body 'Automated Traefik downstream synchronization failed for upstream `%s`.\n\nWorkflow: %s\n\nThe known-good branch and published release images were not replaced.' "${UPSTREAM_SHA}" "${RUN_URL}"
+          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "${title} in:title" --json number --jq '.[0].number')"
+          if [ -n "${issue_number}" ]; then
+            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
+          fi
+
+  close-failure-report:
+    name: Close resolved synchronization issue
+    needs: promote
+    if: needs.promote.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Close open blocking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "Downstream sync blocked in:title" --json number --jq '.[0].number')"
+          if [ -n "${issue_number}" ]; then
+            gh issue close "${issue_number}" --repo "${GITHUB_REPOSITORY}" --comment "Synchronization recovered in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+          fi

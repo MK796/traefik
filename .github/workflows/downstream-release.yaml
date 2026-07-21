@@ -1,0 +1,190 @@
+name: Publish recursive-watch release
+
+on:
+  schedule:
+    - cron: "43 3 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Stable upstream v3 tag. Empty selects the newest stable tag.
+        required: false
+        type: string
+
+concurrency:
+  group: downstream-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  issues: write
+  packages: write
+
+jobs:
+  prepare:
+    name: Prepare release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
+      candidate_short: ${{ steps.candidate.outputs.candidate_short }}
+      changed: ${{ steps.select.outputs.changed }}
+      patch_tip_short: ${{ steps.candidate.outputs.patch_tip_short }}
+      source_tag: ${{ steps.select.outputs.source_tag }}
+      upstream_sha: ${{ steps.candidate.outputs.upstream_sha }}
+      upstream_tag: ${{ steps.select.outputs.upstream_tag }}
+
+    steps:
+      - name: Check out known-good downstream
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: downstream/recursive-watch
+          fetch-depth: 0
+
+      - name: Configure release identity
+        run: |
+          git config user.name "MK796 Traefik downstream bot"
+          git config user.email "95221524+MK796@users.noreply.github.com"
+
+      - name: Select stable upstream release
+        id: select
+        env:
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/traefik/traefik.git
+          else
+            git remote add upstream https://github.com/traefik/traefik.git
+          fi
+          git fetch --tags upstream
+
+          upstream_tag="${REQUESTED_TAG}"
+          if [ -z "${upstream_tag}" ]; then
+            while IFS= read -r candidate_tag; do
+              if [[ "${candidate_tag}" =~ ^v3\.[0-9]+\.[0-9]+$ ]]; then
+                upstream_tag="${candidate_tag}"
+                break
+              fi
+            done < <(git tag --list 'v3.*' --sort=-version:refname)
+          fi
+          if ! [[ "${upstream_tag}" =~ ^v3\.[0-9]+\.[0-9]+$ ]]; then
+            echo "No stable Traefik v3 release tag was selected." >&2
+            exit 1
+          fi
+
+          patch_tip_short="$(git rev-parse --short=12 HEAD)"
+          source_tag="downstream-${upstream_tag}-recursive.${patch_tip_short}"
+          echo "upstream_tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+          echo "source_tag=${source_tag}" >> "${GITHUB_OUTPUT}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${source_tag}" >/dev/null 2>&1; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Prepare patched release candidate
+        id: candidate
+        if: steps.select.outputs.changed == 'true'
+        env:
+          CANDIDATE_BRANCH: automation/release-${{ steps.select.outputs.upstream_tag }}-${{ github.run_id }}
+          UPSTREAM_TAG: ${{ steps.select.outputs.upstream_tag }}
+        run: ./script/downstream/prepare-release-candidate.sh
+
+  verify:
+    name: Verify release candidate
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    uses: ./.github/workflows/downstream-verify.yaml
+    with:
+      candidate_sha: ${{ needs.prepare.outputs.candidate_sha }}
+      upstream_sha: ${{ needs.prepare.outputs.upstream_sha }}
+
+  publish:
+    name: Publish immutable release image
+    needs:
+      - prepare
+      - verify
+    if: needs.prepare.outputs.changed == 'true'
+    uses: ./.github/workflows/downstream-image.yaml
+    with:
+      candidate_sha: ${{ needs.prepare.outputs.candidate_sha }}
+      image_tag: ${{ needs.prepare.outputs.upstream_tag }}-recursive.${{ needs.prepare.outputs.patch_tip_short }}
+      upstream_ref: ${{ needs.prepare.outputs.upstream_tag }}
+      upstream_sha: ${{ needs.prepare.outputs.upstream_sha }}
+
+  finalize:
+    name: Record verified release
+    needs:
+      - prepare
+      - verify
+      - publish
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      INGRESS_UPDATE_TOKEN: ${{ secrets.INGRESS_UPDATE_TOKEN }}
+
+    steps:
+      - name: Check out exact release candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Publish immutable source tag
+        env:
+          SOURCE_TAG: ${{ needs.prepare.outputs.source_tag }}
+        run: |
+          git config user.name "MK796 Traefik downstream bot"
+          git config user.email "95221524+MK796@users.noreply.github.com"
+          git tag --annotate "${SOURCE_TAG}" --message "Verified downstream for ${{ needs.prepare.outputs.upstream_tag }}"
+          git push origin "refs/tags/${SOURCE_TAG}"
+
+      - name: Record release
+        env:
+          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          IMAGE_REF: ${{ needs.publish.outputs.image_ref }}
+        run: |
+          {
+            echo "### Verified downstream release"
+            echo
+            echo "- Source tag: \`${{ needs.prepare.outputs.source_tag }}\`"
+            echo "- Image: \`${IMAGE_REF}@${IMAGE_DIGEST}\`"
+            echo "- Upstream: \`${{ needs.prepare.outputs.upstream_tag }}\` at \`${{ needs.prepare.outputs.upstream_sha }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Notify ingress-stack update workflow
+        if: env.INGRESS_UPDATE_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.INGRESS_UPDATE_TOKEN }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          IMAGE_REF: ${{ needs.publish.outputs.image_ref }}
+        run: |
+          jq -n \
+            --arg image_digest "${IMAGE_DIGEST}" \
+            --arg image_ref "${IMAGE_REF}" \
+            --arg source_tag "${{ needs.prepare.outputs.source_tag }}" \
+            --arg upstream_tag "${{ needs.prepare.outputs.upstream_tag }}" \
+            '{event_type:"traefik-downstream-release",client_payload:{image_ref:$image_ref,image_digest:$image_digest,source_tag:$source_tag,upstream_tag:$upstream_tag}}' \
+            | gh api --method POST repos/MK796/ingress-stack/dispatches --input -
+
+  report-failure:
+    name: Report blocked release
+    needs:
+      - prepare
+      - verify
+      - publish
+      - finalize
+    if: ${{ always() && (needs.prepare.result == 'failure' || needs.verify.result == 'failure' || needs.publish.result == 'failure' || needs.finalize.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Create release failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag || 'unknown' }}
+        run: |
+          gh issue create --repo "${GITHUB_REPOSITORY}" --title "Downstream release blocked for ${UPSTREAM_TAG}" --body "The verified image was not published. Workflow: ${RUN_URL}"

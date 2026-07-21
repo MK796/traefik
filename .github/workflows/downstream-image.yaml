@@ -1,0 +1,195 @@
+name: Downstream image
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+      upstream_ref:
+        required: true
+        type: string
+      upstream_sha:
+        required: true
+        type: string
+    outputs:
+      image_digest:
+        value: ${{ jobs.publish.outputs.image_digest }}
+      image_ref:
+        value: ${{ jobs.publish.outputs.image_ref }}
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  build-webui:
+    name: Build WebUI
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version-file: webui/.nvmrc
+          cache: yarn
+          cache-dependency-path: webui/yarn.lock
+
+      - name: Set up safe-chain
+        working-directory: webui
+        run: |
+          npm install --global @aikidosec/safe-chain
+          safe-chain setup-ci
+
+      - name: Build WebUI
+        working-directory: webui
+        run: |
+          yarn install
+          yarn tsc
+          yarn lint
+          yarn build
+
+      - name: Package WebUI
+        run: tar czf webui.tar.gz ./webui/static/
+
+      - name: Upload WebUI
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: downstream-webui-${{ inputs.candidate_sha }}
+          path: webui.tar.gz
+          retention-days: 1
+
+  publish:
+    name: Build, verify, and publish image
+    needs: build-webui
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      image_digest: ${{ steps.publish.outputs.image_digest }}
+      image_ref: ${{ steps.metadata.outputs.image_ref }}
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download WebUI
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: downstream-webui-${{ inputs.candidate_sha }}
+
+      - name: Extract WebUI
+        run: tar xzf webui.tar.gz
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: .go-version
+          check-latest: true
+
+      - name: Define immutable image metadata
+        id: metadata
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          image_owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image_ref="ghcr.io/${image_owner}/traefik:${IMAGE_TAG}"
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build release binaries
+        env:
+          DOWNSTREAM_VERSION: ${{ inputs.upstream_ref }}-recursive
+        run: |
+          build_date="$(date -u '+%Y-%m-%d_%H:%M:%S%p')"
+          ldflags="-s -w -X github.com/traefik/traefik/v3/pkg/version.Version=${DOWNSTREAM_VERSION} -X github.com/traefik/traefik/v3/pkg/version.Codename=downstream -X github.com/traefik/traefik/v3/pkg/version.BuildDate=${build_date}"
+          for architecture in amd64 arm64; do
+            mkdir -p "dist/linux/${architecture}"
+            CGO_ENABLED=0 GOOS=linux GOARCH="${architecture}" go build -trimpath -ldflags "${ldflags}" -installsuffix nocgo -o "dist/linux/${architecture}/traefik" ./cmd/traefik
+          done
+
+      - name: Verify final amd64 image
+        env:
+          IMAGE_REF: ${{ steps.metadata.outputs.image_ref }}
+        run: |
+          docker build --build-arg TARGETPLATFORM=linux/amd64 --tag "${IMAGE_REF}-e2e" .
+          E2E_TIMEOUT_SECONDS=30 ./script/downstream/recursive-watch-container-e2e.sh "${IMAGE_REF}-e2e"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Reject an existing immutable tag
+        env:
+          IMAGE_REF: ${{ steps.metadata.outputs.image_ref }}
+        run: |
+          if docker manifest inspect "${IMAGE_REF}" >/dev/null 2>&1; then
+            echo "Refusing to overwrite immutable image tag ${IMAGE_REF}." >&2
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Publish multi-architecture image
+        id: publish
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          IMAGE_REF: ${{ steps.metadata.outputs.image_ref }}
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+          UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        run: |
+          metadata_file="${RUNNER_TEMP}/build-metadata.json"
+          docker buildx build \
+            --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.title=Traefik recursive-watch downstream" \
+            --label "org.opencontainers.image.version=${UPSTREAM_REF}" \
+            --label "net.mk-homelab.traefik.upstream-revision=${UPSTREAM_SHA}" \
+            --metadata-file "${metadata_file}" \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=mode=max \
+            --push \
+            --sbom=true \
+            --tag "${IMAGE_REF}" \
+            .
+          image_digest="$(jq -r '.["containerimage.digest"]' "${metadata_file}")"
+          test -n "${image_digest}"
+          test "${image_digest}" != "null"
+          echo "image_digest=${image_digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish summary
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.image_digest }}
+          IMAGE_REF: ${{ steps.metadata.outputs.image_ref }}
+        run: |
+          {
+            echo "### Published downstream image"
+            echo
+            echo "- Image: \`${IMAGE_REF}\`"
+            echo "- Digest: \`${IMAGE_DIGEST}\`"
+            echo "- Candidate: \`${{ inputs.candidate_sha }}\`"
+            echo "- Upstream: \`${{ inputs.upstream_sha }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
