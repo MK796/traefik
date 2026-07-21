@@ -337,9 +337,6 @@ jobs:
       - name: Make binary executable
         run: chmod +x dist/linux/amd64/traefik
 
-      - name: Create empty timing data
-        run: echo '<?xml version="1.0" encoding="UTF-8"?><testsuites></testsuites>' > integration-test-summary.xml
-
       - name: Select integration-test shard
         id: test-split
         uses: hashicorp-forge/go-test-split-action@3b2b67379b94f6bea96556b2e4e15929b57c10cf # v2.0.3
@@ -347,7 +344,6 @@ jobs:
           packages: ./integration
           total: 12
           index: ${{ matrix.index }}
-          junit-summary: ${{ github.workspace }}/integration-test-summary.xml
 
       - name: Run integration-test shard
         env:

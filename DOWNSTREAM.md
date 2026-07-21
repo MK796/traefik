@@ -31,6 +31,11 @@ reconstructs the same candidate. The image carries the exact upstream and
 candidate commits as OCI metadata and is published with BuildKit provenance and
 an SBOM.
 
+The corresponding GitHub release is the completion marker. Its
+`downstream-release.json` asset records the immutable image reference, digest,
+candidate, upstream commit, and patchset ID. A source tag without that release
+asset is treated as incomplete and resumed on the next run.
+
 Failures leave the known-good branch and existing images untouched and are
 reported as GitHub issues.
 
@@ -47,11 +52,10 @@ kqueue event-ordering problem while fsnotify decides its recursive-watch API.
 Production must use a stable `v3.x.y-recursive.<patch>` image pinned by digest.
 Master images are compatibility artifacts and must not be deployed.
 
-The optional `INGRESS_UPDATE_TOKEN` secret may dispatch a
-`traefik-downstream-release` event to `MK796/ingress-stack` after a verified
-release. The token must be fine-grained and limited to that repository. The
-ingress repository is responsible for opening a reviewable update PR; releases
-never deploy automatically.
+The ingress repository polls completed downstream GitHub releases and validates
+their `downstream-release.json` assets before opening a reviewable digest-update
+PR. No cross-repository write token is required, and releases never deploy
+automatically.
 
 ## Retirement
 

@@ -29,6 +29,7 @@ jobs:
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       candidate_short: ${{ steps.candidate.outputs.candidate_short }}
       changed: ${{ steps.select.outputs.changed }}
+      patchset_id: ${{ steps.select.outputs.patchset_id }}
       patchset_short: ${{ steps.select.outputs.patchset_short }}
       source_tag: ${{ steps.select.outputs.source_tag }}
       upstream_sha: ${{ steps.candidate.outputs.upstream_sha }}
@@ -49,6 +50,7 @@ jobs:
       - name: Select stable upstream release
         id: select
         env:
+          GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ inputs.upstream_tag }}
         run: |
           if git remote get-url upstream >/dev/null 2>&1; then
@@ -78,7 +80,8 @@ jobs:
           patchset_short="${patchset_id:0:12}"
           source_tag="downstream-${upstream_tag}-recursive.${patchset_short}"
 
-          if git ls-remote --exit-code --tags origin "refs/tags/${source_tag}" >/dev/null 2>&1; then
+          release_asset="$(gh release view "${source_tag}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[] | select(.name == "downstream-release.json") | .name' 2>/dev/null || true)"
+          if [ "${release_asset}" = "downstream-release.json" ]; then
             changed=false
           else
             changed=true
@@ -86,6 +89,7 @@ jobs:
 
           {
             echo "upstream_tag=${upstream_tag}"
+            echo "patchset_id=${patchset_id}"
             echo "patchset_short=${patchset_short}"
             echo "source_tag=${source_tag}"
             echo "changed=${changed}"
@@ -102,8 +106,8 @@ jobs:
       - name: Verify release patch identity
         if: steps.select.outputs.changed == 'true'
         env:
-          ACTUAL_PATCHSET: ${{ steps.candidate.outputs.patchset_short }}
-          EXPECTED_PATCHSET: ${{ steps.select.outputs.patchset_short }}
+          ACTUAL_PATCHSET: ${{ steps.candidate.outputs.patchset_id }}
+          EXPECTED_PATCHSET: ${{ steps.select.outputs.patchset_id }}
         run: test "${ACTUAL_PATCHSET}" = "${EXPECTED_PATCHSET}"
 
   verify:
@@ -137,8 +141,6 @@ jobs:
     if: needs.prepare.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      INGRESS_UPDATE_TOKEN: ${{ secrets.INGRESS_UPDATE_TOKEN }}
 
     steps:
       - name: Check out exact release candidate
@@ -149,40 +151,74 @@ jobs:
 
       - name: Publish immutable source tag
         env:
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.candidate_sha }}
           SOURCE_TAG: ${{ needs.prepare.outputs.source_tag }}
         run: |
           git config user.name "MK796 Traefik downstream bot"
           git config user.email "95221524+MK796@users.noreply.github.com"
-          git tag --annotate "${SOURCE_TAG}" --message "Verified downstream for ${{ needs.prepare.outputs.upstream_tag }}"
-          git push origin "refs/tags/${SOURCE_TAG}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${SOURCE_TAG}" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/${SOURCE_TAG}:refs/tags/${SOURCE_TAG}"
+            test "$(git rev-parse "refs/tags/${SOURCE_TAG}^{commit}")" = "${CANDIDATE_SHA}"
+          else
+            git tag --annotate "${SOURCE_TAG}" --message "Verified downstream for ${{ needs.prepare.outputs.upstream_tag }}"
+            git push origin "refs/tags/${SOURCE_TAG}"
+          fi
 
-      - name: Record release
+      - name: Publish immutable release manifest
         env:
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.candidate_sha }}
+          GH_TOKEN: ${{ github.token }}
           IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
           IMAGE_REF: ${{ needs.publish.outputs.image_ref }}
+          PATCHSET_ID: ${{ needs.prepare.outputs.patchset_id }}
+          SOURCE_TAG: ${{ needs.prepare.outputs.source_tag }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
         run: |
-          {
-            echo "### Verified downstream release"
-            echo
-            echo "- Source tag: \`${{ needs.prepare.outputs.source_tag }}\`"
-            echo "- Image: \`${IMAGE_REF}@${IMAGE_DIGEST}\`"
-            echo "- Upstream: \`${{ needs.prepare.outputs.upstream_tag }}\` at \`${{ needs.prepare.outputs.upstream_sha }}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
+          release_directory="${RUNNER_TEMP}/downstream-release"
+          release_manifest="${release_directory}/downstream-release.json"
+          release_notes="${release_directory}/release-notes.md"
+          mkdir -p "${release_directory}"
 
-      - name: Notify ingress-stack update workflow
-        if: env.INGRESS_UPDATE_TOKEN != ''
-        env:
-          GH_TOKEN: ${{ env.INGRESS_UPDATE_TOKEN }}
-          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
-          IMAGE_REF: ${{ needs.publish.outputs.image_ref }}
-        run: |
-          jq -n \
+          # shellcheck disable=SC2016
+          jq --null-input \
+            --arg candidate_sha "${CANDIDATE_SHA}" \
+            --arg image "${IMAGE_REF}@${IMAGE_DIGEST}" \
             --arg image_digest "${IMAGE_DIGEST}" \
             --arg image_ref "${IMAGE_REF}" \
-            --arg source_tag "${{ needs.prepare.outputs.source_tag }}" \
-            --arg upstream_tag "${{ needs.prepare.outputs.upstream_tag }}" \
-            '{event_type:"traefik-downstream-release",client_payload:{image_ref:$image_ref,image_digest:$image_digest,source_tag:$source_tag,upstream_tag:$upstream_tag}}' \
-            | gh api --method POST repos/MK796/ingress-stack/dispatches --input -
+            --arg patchset_id "${PATCHSET_ID}" \
+            --arg source_tag "${SOURCE_TAG}" \
+            --arg upstream_sha "${UPSTREAM_SHA}" \
+            --arg upstream_tag "${UPSTREAM_TAG}" \
+            '{schema_version:1,candidate_sha:$candidate_sha,image:$image,image_ref:$image_ref,image_digest:$image_digest,patchset_id:$patchset_id,source_tag:$source_tag,upstream_sha:$upstream_sha,upstream_tag:$upstream_tag}' \
+            > "${release_manifest}"
+
+          {
+            echo "Verified recursive-watch downstream for Traefik ${UPSTREAM_TAG}."
+            echo
+            echo "- Source tag: \`${SOURCE_TAG}\`"
+            echo "- Image: \`${IMAGE_REF}@${IMAGE_DIGEST}\`"
+            echo "- Upstream: \`${UPSTREAM_TAG}\` at \`${UPSTREAM_SHA}\`"
+            echo "- Patchset: \`${PATCHSET_ID}\`"
+          } > "${release_notes}"
+
+          if gh release view "${SOURCE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            existing_directory="${RUNNER_TEMP}/existing-downstream-release"
+            mkdir -p "${existing_directory}"
+            if gh release download "${SOURCE_TAG}" --repo "${GITHUB_REPOSITORY}" --pattern downstream-release.json --dir "${existing_directory}" >/dev/null 2>&1; then
+              cmp "${release_manifest}" "${existing_directory}/downstream-release.json"
+            else
+              gh release upload "${SOURCE_TAG}" "${release_manifest}" --repo "${GITHUB_REPOSITORY}"
+            fi
+          else
+            gh release create "${SOURCE_TAG}" "${release_manifest}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Traefik ${UPSTREAM_TAG} recursive-watch downstream" \
+              --notes-file "${release_notes}" \
+              --verify-tag
+          fi
+
+          cat "${release_notes}" >> "${GITHUB_STEP_SUMMARY}"
 
   report-failure:
     name: Report blocked release
