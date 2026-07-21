@@ -74,7 +74,11 @@ func TestProvideWatchRecursively(t *testing.T) {
 		configurationChan := startWatchedDirectoryProvider(t, directory)
 		waitForService(t, configurationChan, "before")
 
-		require.NoError(t, os.RemoveAll(configurationDirectory))
+		// Windows can transiently report a sharing violation while fsnotify
+		// finishes delivering events for the watched directory.
+		requireEventuallyNoError(t, func() error {
+			return os.RemoveAll(configurationDirectory)
+		})
 		waitForMissingService(t, configurationChan, "before")
 
 		require.NoError(t, os.Mkdir(configurationDirectory, 0o755))
